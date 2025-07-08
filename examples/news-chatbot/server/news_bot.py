@@ -86,10 +86,9 @@ async def main():
             token,
             "Latest news!",
             DailyParams(
+                audio_in_enabled=True,
                 audio_out_enabled=True,
-                vad_enabled=True,
                 vad_analyzer=SileroVADAnalyzer(),
-                vad_audio_passthrough=True,
             ),
         )
 
@@ -103,9 +102,9 @@ async def main():
 
         llm = GoogleLLMService(
             api_key=os.getenv("GOOGLE_API_KEY"),
-            model="gemini-1.5-flash-002",
             system_instruction=system_instruction,
             tools=tools,
+            model="gemini-1.5-flash",
         )
 
         context = OpenAILLMContext(
@@ -141,7 +140,10 @@ async def main():
 
         task = PipelineTask(
             pipeline,
-            params=PipelineParams(allow_interruptions=True),
+            params=PipelineParams(
+                enable_metrics=True,
+                enable_usage_metrics=True,
+            ),
             observers=[GoogleRTVIObserver(rtvi)],
         )
 
@@ -154,7 +156,6 @@ async def main():
         @transport.event_handler("on_first_participant_joined")
         async def on_first_participant_joined(transport, participant):
             logger.debug("First participant joined: {}", participant["id"])
-            await transport.capture_participant_transcription(participant["id"])
 
         @transport.event_handler("on_participant_left")
         async def on_participant_left(transport, participant, reason):

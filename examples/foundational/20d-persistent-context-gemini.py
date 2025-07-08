@@ -4,6 +4,7 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
+import argparse
 import glob
 import json
 import os
@@ -14,6 +15,7 @@ from loguru import logger
 
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
+from pipecat.examples.run import get_transport_client_id, maybe_capture_participant_camera
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
@@ -23,49 +25,45 @@ from pipecat.processors.aggregators.openai_llm_context import (
 from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.google.llm import GoogleLLMService
-from pipecat.transports.base_transport import TransportParams
-from pipecat.transports.network.small_webrtc import SmallWebRTCTransport
-from pipecat.transports.network.webrtc_connection import SmallWebRTCConnection
+from pipecat.services.llm_service import FunctionCallParams
+from pipecat.transports.base_transport import BaseTransport, TransportParams
+from pipecat.transports.services.daily import DailyParams
 
 load_dotenv(override=True)
 
 
-video_participant_id = None
-
-
 BASE_FILENAME = "/tmp/pipecat_conversation_"
-tts = None
-webrtc_peer_id = None
+
+# Global variable to store the client ID
+client_id = ""
 
 
-async def fetch_weather_from_api(function_name, tool_call_id, args, llm, context, result_callback):
-    temperature = 75 if args["format"] == "fahrenheit" else 24
-    await result_callback(
+async def fetch_weather_from_api(params: FunctionCallParams):
+    temperature = 75 if params.arguments["format"] == "fahrenheit" else 24
+    await params.result_callback(
         {
             "conditions": "nice",
             "temperature": temperature,
-            "format": args["format"],
+            "format": params.arguments["format"],
             "timestamp": datetime.now().strftime("%Y%m%d_%H%M%S"),
         }
     )
 
 
-async def get_image(function_name, tool_call_id, arguments, llm, context, result_callback):
-    question = arguments["question"]
-    logger.debug(f"Requesting image with user_id={webrtc_peer_id}, question={question}")
+async def get_image(params: FunctionCallParams):
+    question = params.arguments["question"]
+    logger.debug(f"Requesting image with user_id={client_id}, question={question}")
 
     # Request the image frame
-    await llm.request_image_frame(
-        user_id=webrtc_peer_id,
-        function_name=function_name,
-        tool_call_id=tool_call_id,
+    await params.llm.request_image_frame(
+        user_id=client_id,
+        function_name=params.function_name,
+        tool_call_id=params.tool_call_id,
         text_content=question,
     )
 
 
-async def get_saved_conversation_filenames(
-    function_name, tool_call_id, args, llm, context, result_callback
-):
+async def get_saved_conversation_filenames(params: FunctionCallParams):
     # Construct the full pattern including the BASE_FILENAME
     full_pattern = f"{BASE_FILENAME}*.json"
 
@@ -73,43 +71,42 @@ async def get_saved_conversation_filenames(
     matching_files = glob.glob(full_pattern)
     logger.debug(f"matching files: {matching_files}")
 
-    await result_callback({"filenames": matching_files})
+    await params.result_callback({"filenames": matching_files})
 
 
-async def save_conversation(function_name, tool_call_id, args, llm, context, result_callback):
+async def save_conversation(params: FunctionCallParams):
     timestamp = datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
     filename = f"{BASE_FILENAME}{timestamp}.json"
     logger.debug(
-        f"writing conversation to {filename}\n{json.dumps(context.get_messages_for_logging(), indent=4)}"
+        f"writing conversation to {filename}\n{json.dumps(params.context.get_messages_for_logging(), indent=4)}"
     )
     try:
         with open(filename, "w") as file:
             # todo: extract 'system' into the first message in the list
-            messages = context.get_messages_for_persistent_storage()
+            messages = params.context.get_messages_for_persistent_storage()
             # remove the last message (the instruction to save the context)
             messages.pop()
             json.dump(messages, file, indent=2)
-        await result_callback({"success": True})
+        await params.result_callback({"success": True})
     except Exception as e:
         logger.debug(f"error saving conversation: {e}")
-        await result_callback({"success": False, "error": str(e)})
+        await params.result_callback({"success": False, "error": str(e)})
 
 
-async def load_conversation(function_name, tool_call_id, args, llm, context, result_callback):
-    global tts
-    filename = args["filename"]
+async def load_conversation(params: FunctionCallParams):
+    filename = params.arguments["filename"]
     logger.debug(f"loading conversation from {filename}")
     try:
         with open(filename, "r") as file:
-            context.set_messages(json.load(file))
-        await result_callback(
+            params.context.set_messages(json.load(file))
+        await params.result_callback(
             {
                 "success": True,
                 "message": "The most recent conversation has been loaded. Awaiting further instructions.",
             }
         )
     except Exception as e:
-        await result_callback({"success": False, "error": str(e)})
+        await params.result_callback({"success": False, "error": str(e)})
 
 
 # Test message munging ...
@@ -221,23 +218,27 @@ tools = [
 ]
 
 
-async def run_bot(webrtc_connection: SmallWebRTCConnection):
-    global tts, webrtc_peer_id
-    webrtc_peer_id = webrtc_connection.pc_id
+# We store functions so objects (e.g. SileroVADAnalyzer) don't get
+# instantiated. The function will be called when the desired transport gets
+# selected.
+transport_params = {
+    "daily": lambda: DailyParams(
+        audio_in_enabled=True,
+        audio_out_enabled=True,
+        video_in_enabled=True,
+        vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=0.8)),
+    ),
+    "webrtc": lambda: TransportParams(
+        audio_in_enabled=True,
+        audio_out_enabled=True,
+        video_in_enabled=True,
+        vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=0.8)),
+    ),
+}
 
-    logger.info(f"Starting bot with peer_id: {webrtc_peer_id}")
 
-    transport = SmallWebRTCTransport(
-        webrtc_connection=webrtc_connection,
-        params=TransportParams(
-            audio_in_enabled=True,
-            audio_out_enabled=True,
-            camera_in_enabled=True,
-            vad_enabled=True,
-            vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=0.8)),
-            vad_audio_passthrough=True,
-        ),
-    )
+async def run_example(transport: BaseTransport, _: argparse.Namespace, handle_sigint: bool):
+    logger.info(f"Starting bot")
 
     stt = DeepgramSTTService(api_key=os.getenv("DEEPGRAM_API_KEY"))
 
@@ -274,34 +275,34 @@ async def run_bot(webrtc_connection: SmallWebRTCConnection):
     task = PipelineTask(
         pipeline,
         params=PipelineParams(
-            allow_interruptions=True,
             enable_metrics=True,
             enable_usage_metrics=True,
-            # report_only_initial_ttfb=True,
         ),
     )
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
         logger.info(f"Client connected")
+
+        await maybe_capture_participant_camera(transport, client)
+
+        global client_id
+        client_id = get_transport_client_id(transport, client)
+
         # Kick off the conversation.
         await task.queue_frames([context_aggregator.user().get_context_frame()])
 
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
         logger.info(f"Client disconnected")
-
-    @transport.event_handler("on_client_closed")
-    async def on_client_closed(transport, client):
-        logger.info(f"Client closed connection")
         await task.cancel()
 
-    runner = PipelineRunner(handle_sigint=False)
+    runner = PipelineRunner(handle_sigint=handle_sigint)
 
     await runner.run(task)
 
 
 if __name__ == "__main__":
-    from run import main
+    from pipecat.examples.run import main
 
-    main()
+    main(run_example, transport_params=transport_params)

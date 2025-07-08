@@ -58,10 +58,9 @@ async def main():
         token,
         "Instant voice Chatbot",
         DailyParams(
+            audio_in_enabled=True,
             audio_out_enabled=True,
-            vad_enabled=True,
             vad_analyzer=SileroVADAnalyzer(),
-            vad_audio_passthrough=True,
         ),
     )
 
@@ -91,7 +90,10 @@ async def main():
 
     task = PipelineTask(
         pipeline,
-        params=PipelineParams(allow_interruptions=True),
+        params=PipelineParams(
+            enable_metrics=True,
+            enable_usage_metrics=True,
+        ),
         observers=[RTVIObserver(rtvi)],
     )
 

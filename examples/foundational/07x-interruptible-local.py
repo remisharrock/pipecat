@@ -32,9 +32,7 @@ async def main():
         LocalAudioTransportParams(
             audio_in_enabled=True,
             audio_out_enabled=True,
-            vad_enabled=True,
             vad_analyzer=SileroVADAnalyzer(),
-            vad_audio_passthrough=True,
         )
     )
 
@@ -72,10 +70,8 @@ async def main():
     task = PipelineTask(
         pipeline,
         params=PipelineParams(
-            allow_interruptions=True,
             enable_metrics=True,
             enable_usage_metrics=True,
-            report_only_initial_ttfb=True,
         ),
     )
 

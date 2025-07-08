@@ -122,11 +122,11 @@ async def main():
             token,
             "Chatbot",
             DailyParams(
+                audio_in_enabled=True,
                 audio_out_enabled=True,
-                camera_out_enabled=True,
-                camera_out_width=1024,
-                camera_out_height=576,
-                vad_enabled=True,
+                video_out_enabled=True,
+                video_out_width=1024,
+                video_out_height=576,
                 vad_analyzer=SileroVADAnalyzer(),
                 transcription_enabled=True,
                 #
@@ -199,7 +199,6 @@ async def main():
         task = PipelineTask(
             pipeline,
             params=PipelineParams(
-                allow_interruptions=True,
                 enable_metrics=True,
                 enable_usage_metrics=True,
             ),
@@ -215,6 +214,7 @@ async def main():
 
         @transport.event_handler("on_first_participant_joined")
         async def on_first_participant_joined(transport, participant):
+            print(f"Participant joined: {participant}")
             await transport.capture_participant_transcription(participant["id"])
 
         @transport.event_handler("on_participant_left")
