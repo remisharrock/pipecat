@@ -28,12 +28,14 @@ from pipecat.processors.frameworks.rtvi import (
     RTVIProcessor,
     RTVIServerMessageFrame,
 )
-from pipecat.services.cartesia.tts import CartesiaTTSService
-from pipecat.services.deepgram.stt import DeepgramSTTService
-from pipecat.services.openai import OpenAIContextAggregatorPair
+from pipecat.services.azure.stt import AzureSTTService
+from pipecat.services.azure.tts import AzureTTSService
+from pipecat.services.openai.llm import OpenAIContextAggregatorPair
 from pipecat.services.openai.llm import OpenAILLMService
+from pipecat.transcriptions.language import Language
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.services.daily import DailyParams
+from pipecat.transports.network.fastapi_websocket import FastAPIWebsocketParams
 
 load_dotenv(override=True)
 
@@ -86,24 +88,36 @@ transport_params = {
         audio_out_enabled=True,
         vad_analyzer=SileroVADAnalyzer(),
     ),
+    "twilio": lambda: FastAPIWebsocketParams(
+        audio_in_enabled=True,
+        audio_out_enabled=True,
+        vad_analyzer=SileroVADAnalyzer(),
+    ),
 }
 
 
 async def run_example(transport: BaseTransport, _: argparse.Namespace, handle_sigint: bool):
     logger.info(f"Starting bot")
 
-    stt = DeepgramSTTService(api_key=os.getenv("DEEPGRAM_API_KEY"))
+    stt = AzureSTTService(
+        api_key=os.getenv("AZURE_SPEECH_API_KEY"),
+        region=os.getenv("AZURE_SPEECH_REGION"),
+        language=Language.FR_FR,
+        audio_passthrough=True
+    )
 
     llm = OpenAILLMService(api_key=os.getenv("OPENAI_API_KEY"))
 
-    tts = CartesiaTTSService(
-        api_key=os.getenv("CARTESIA_API_KEY"), voice_id="71a7ad14-091c-4e8e-a314-022ece01c121"
+    tts = AzureTTSService(
+        api_key=os.getenv("AZURE_SPEECH_API_KEY"),
+        region=os.getenv("AZURE_SPEECH_REGION"),
+        voice="fr-FR-VivienneMultilingualNeural"
     )
 
     messages = [
         {
             "role": "system",
-            "content": "You are a helpful LLM in a WebRTC call. Your goal is to demonstrate your capabilities in a succinct way. Respond to what the user says in a creative and helpful way. Explain to the User they can speak or type text to communicate with you.",
+            "content": "Tu es un agent LLM dans un appel en WebRTC audio.",
         },
     ]
 

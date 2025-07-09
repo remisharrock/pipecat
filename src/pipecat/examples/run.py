@@ -1,3 +1,5 @@
+print(">>> run.py CHARGÉ <<<")
+
 #
 # Copyright (c) 2024–2025, Daily
 #
@@ -26,6 +28,7 @@ from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import Response
 from loguru import logger
 
 from pipecat.serializers.twilio import TwilioFrameSerializer
@@ -191,6 +194,14 @@ def run_example_webrtc(
 
     app = FastAPI()
 
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],  # Autorise toutes les origines pour le test
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
     # Store connections by pc_id
     pcs_map: Dict[str, SmallWebRTCConnection] = {}
 
@@ -251,6 +262,17 @@ def run_example_webrtc(
         pcs_map[answer["pc_id"]] = pipecat_connection
 
         return answer
+    @app.options("/api/offer")
+    async def options_offer():
+        print("OPTIONS /api/offer route loaded")
+        return Response(
+            status_code=200,
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "POST, OPTIONS",
+                "Access-Control-Allow-Headers": "*",
+            }
+        )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -266,7 +288,7 @@ def run_example_webrtc(
         coros = [pc.disconnect() for pc in pcs_map.values()]
         await asyncio.gather(*coros)
         pcs_map.clear()
-
+    print(">>> uvicorn.run(app, ...) appelé <<<")
     uvicorn.run(app, host=args.host, port=args.port)
 
 

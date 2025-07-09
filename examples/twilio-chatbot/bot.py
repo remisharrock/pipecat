@@ -22,8 +22,9 @@ from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
 from pipecat.processors.audio.audio_buffer_processor import AudioBufferProcessor
 from pipecat.serializers.twilio import TwilioFrameSerializer
-from pipecat.services.cartesia.tts import CartesiaTTSService
-from pipecat.services.deepgram.stt import DeepgramSTTService
+from pipecat.services.azure.stt import AzureSTTService
+from pipecat.services.azure.tts import AzureTTSService
+from pipecat.transcriptions.language import Language
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.transports.network.fastapi_websocket import (
     FastAPIWebsocketParams,
@@ -75,18 +76,23 @@ async def run_bot(websocket_client: WebSocket, stream_sid: str, call_sid: str, t
 
     llm = OpenAILLMService(api_key=os.getenv("OPENAI_API_KEY"))
 
-    stt = DeepgramSTTService(api_key=os.getenv("DEEPGRAM_API_KEY"), audio_passthrough=True)
+    stt = AzureSTTService(
+        api_key=os.getenv("AZURE_SPEECH_API_KEY"),
+        region=os.getenv("AZURE_SPEECH_REGION"),
+        language=Language.FR_FR,
+        audio_passthrough=True
+    )
 
-    tts = CartesiaTTSService(
-        api_key=os.getenv("CARTESIA_API_KEY"),
-        voice_id="71a7ad14-091c-4e8e-a314-022ece01c121",  # British Reading Lady
-        push_silence_after_stop=testing,
+    tts = AzureTTSService(
+        api_key=os.getenv("AZURE_SPEECH_API_KEY"),
+        region=os.getenv("AZURE_SPEECH_REGION"),
+        voice="fr-FR-Vivienne:DragonHDLatestNeural"
     )
 
     messages = [
         {
             "role": "system",
-            "content": "You are an elementary teacher in an audio call. Your output will be converted to audio so don't include special characters in your answers. Respond to what the student said in a short short sentence.",
+            "content": "Tu es une future prof de français (tu inventes ton histoire, ton nom car tu simules une vraie prof) au lycée émilie de breuteuil à saint quentin en yvelines et tu vas rencontrer ton futur collègue David on vient de te donner son numéro de téléphone. Tu étais avant dans un collège à Toulouse et tu arrives maintenant dans la région parisienne. Tu discutes à l'oral par téléphone avec David pour faire connaissance.",
         },
     ]
 

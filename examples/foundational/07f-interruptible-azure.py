@@ -15,12 +15,13 @@ from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
-from pipecat.services.azure.llm import AzureLLMService
+from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.services.azure.stt import AzureSTTService
 from pipecat.services.azure.tts import AzureTTSService
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.network.fastapi_websocket import FastAPIWebsocketParams
 from pipecat.transports.services.daily import DailyParams
+from pipecat.processors.frameworks.rtvi import RTVIConfig, RTVIObserver, RTVIProcessor
 
 load_dotenv(override=True)
 
@@ -59,11 +60,8 @@ async def run_example(transport: BaseTransport, _: argparse.Namespace, handle_si
         region=os.getenv("AZURE_SPEECH_REGION"),
     )
 
-    llm = AzureLLMService(
-        api_key=os.getenv("AZURE_CHATGPT_API_KEY"),
-        endpoint=os.getenv("AZURE_CHATGPT_ENDPOINT"),
-        model=os.getenv("AZURE_CHATGPT_MODEL"),
-    )
+    llm = OpenAILLMService(api_key=os.getenv("OPENAI_API_KEY"))
+
 
     messages = [
         {
@@ -75,15 +73,19 @@ async def run_example(transport: BaseTransport, _: argparse.Namespace, handle_si
     context = OpenAILLMContext(messages)
     context_aggregator = llm.create_context_aggregator(context)
 
+    # --- Ajout RTVI ---
+    rtvi = RTVIProcessor(config=RTVIConfig(config=[]))
+
     pipeline = Pipeline(
         [
-            transport.input(),  # Transport user input
-            stt,  # STT
-            context_aggregator.user(),  # User responses
-            llm,  # LLM
-            tts,  # TTS
-            transport.output(),  # Transport bot output
-            context_aggregator.assistant(),  # Assistant spoken responses
+            transport.input(),
+            stt,
+            context_aggregator.user(),
+            rtvi,  # <-- RTVI inséré ici
+            llm,
+            tts,
+            transport.output(),
+            context_aggregator.assistant(),
         ]
     )
 
@@ -93,14 +95,19 @@ async def run_example(transport: BaseTransport, _: argparse.Namespace, handle_si
             enable_metrics=True,
             enable_usage_metrics=True,
         ),
+        observers=[RTVIObserver(rtvi)],  # <-- Observer RTVI ajouté ici
     )
+
+    @rtvi.event_handler("on_client_ready")
+    async def on_client_ready(rtvi):
+        logger.info("Pipecat client ready.")
+        await rtvi.set_bot_ready()
+        # Kick off the conversation.
+        await task.queue_frames([context_aggregator.user().get_context_frame()])
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
         logger.info(f"Client connected")
-        # Kick off the conversation.
-        messages.append({"role": "system", "content": "Please introduce yourself to the user."})
-        await task.queue_frames([context_aggregator.user().get_context_frame()])
 
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
