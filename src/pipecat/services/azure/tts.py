@@ -25,7 +25,7 @@ from pipecat.frames.frames import (
 )
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.azure.common import language_to_azure_language
-from pipecat.services.tts_service import AudioContextWordTTSService, TTSService
+from pipecat.services.tts_service import TTSService, WordTTSService
 from pipecat.transcriptions.language import Language
 from pipecat.utils.tracing.service_decorators import traced_tts
 
@@ -243,7 +243,7 @@ class AzureBaseTTSService(TTSService):
         return escaped_text
 
 
-class AzureTTSService(AudioContextWordTTSService):
+class AzureTTSService(WordTTSService):
     """Azure Cognitive Services streaming TTS service with word timestamps.
 
     Provides real-time text-to-speech synthesis using Azure's WebSocket-based
@@ -302,7 +302,7 @@ class AzureTTSService(AudioContextWordTTSService):
             voice: Voice name to use for synthesis. Defaults to "en-US-SaraNeural".
             sample_rate: Audio sample rate in Hz. If None, uses service default.
             params: Voice and synthesis parameters configuration.
-            **kwargs: Additional arguments passed to parent AudioContextWordTTSService.
+            **kwargs: Additional arguments passed to parent WordTTSService.
         """
         # We want to push text frames ourselves with word-level timing
         super().__init__(
@@ -539,7 +539,6 @@ class AzureTTSService(AudioContextWordTTSService):
     async def flush_audio(self):
         """Flush any pending audio data."""
         logger.trace(f"{self}: flushing audio")
-        # Audio context will handle flushing
 
     async def _handle_interruption(self, frame: InterruptionFrame, direction: FrameDirection):
         """Handle interruption by stopping current synthesis.
@@ -586,13 +585,12 @@ class AzureTTSService(AudioContextWordTTSService):
                 return
 
             try:
-                # Create a context for this synthesis request
-                if not self._context_id:
-                    await self.start_ttfb_metrics()
-                    yield TTSStartedFrame()
-                    self._context_id = str(id(text))  # Use text id as context
-                    await self.create_audio_context(self._context_id)
-                    self._word_timestamps_started = False
+                await self.start_ttfb_metrics()
+                yield TTSStartedFrame()
+                
+                # Mark that we're starting a new synthesis
+                self._context_id = str(id(text))
+                self._word_timestamps_started = False
 
                 ssml = self._construct_ssml(text)
                 self._speech_synthesizer.speak_ssml_async(ssml)
@@ -615,17 +613,11 @@ class AzureTTSService(AudioContextWordTTSService):
                         sample_rate=self.sample_rate,
                         num_channels=1,
                     )
-                    # Add to audio context - it will be pushed automatically by the context handler
-                    await self.append_to_audio_context(self._context_id, frame)
+                    yield frame
 
-                # Remove context when done - this signals completion to the context handler
-                if self._context_id:
-                    await self.remove_audio_context(self._context_id)
-                    self._context_id = None
-
-                # Yield None to signal we're done generating frames
-                # The audio context handler will push frames downstream
-                yield None
+                # Clear context ID when done
+                self._context_id = None
+                yield TTSStoppedFrame()
 
             except Exception as e:
                 logger.error(f"{self} error during synthesis: {e}")
