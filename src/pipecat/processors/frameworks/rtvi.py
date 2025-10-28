@@ -704,6 +704,18 @@ class RTVITextMessageData(BaseModel):
     text: str
 
 
+class RTVITTSTextMessageData(BaseModel):
+    """Data for TTS text messages with optional timestamp.
+
+    Contains text content and optional presentation timestamp in nanoseconds.
+    When timestamp is present, it indicates when this word should be displayed
+    relative to the audio playback.
+    """
+
+    text: str
+    timestamp: Optional[int] = None
+
+
 class RTVIBotTranscriptionMessage(BaseModel):
     """Message containing bot transcription text.
 
@@ -729,12 +741,13 @@ class RTVIBotLLMTextMessage(BaseModel):
 class RTVIBotTTSTextMessage(BaseModel):
     """Message containing bot TTS text output.
 
-    Sent when text is being processed by TTS.
+    Sent when text is being processed by TTS. Includes optional timestamp
+    in nanoseconds for word-level synchronization with audio playback.
     """
 
     label: RTVIMessageLiteral = RTVI_MESSAGE_LABEL
     type: Literal["bot-tts-text"] = "bot-tts-text"
-    data: RTVITextMessageData
+    data: RTVITTSTextMessageData
 
 
 class RTVIAudioMessageData(BaseModel):
@@ -1050,7 +1063,9 @@ class RTVIObserver(BaseObserver):
             await self.send_rtvi_message(RTVIBotTTSStoppedMessage())
         elif isinstance(frame, TTSTextFrame) and self._params.bot_tts_enabled:
             if isinstance(src, BaseOutputTransport):
-                message = RTVIBotTTSTextMessage(data=RTVITextMessageData(text=frame.text))
+                message = RTVIBotTTSTextMessage(
+                    data=RTVITTSTextMessageData(text=frame.text, timestamp=frame.pts)
+                )
                 await self.send_rtvi_message(message)
             else:
                 mark_as_seen = False
