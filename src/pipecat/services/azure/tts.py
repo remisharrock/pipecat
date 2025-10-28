@@ -329,7 +329,6 @@ class AzureTTSService(AudioContextWordTTSService):
         self._speech_synthesizer = None
         self._audio_queue = asyncio.Queue()
         self._context_id = None
-        self._pending_word_task = None
         self._word_timestamps_started = False
 
     def can_generate_metrics(self) -> bool:
@@ -481,10 +480,10 @@ class AzureTTSService(AudioContextWordTTSService):
         
         # Queue the word timestamp for processing
         if self._context_id and word:
-            # Schedule word timestamp addition without blocking
-            self._pending_word_task = asyncio.create_task(
-                self._add_word_timestamp_async(word, timestamp_seconds)
-            )
+            # Create task to add word timestamp without blocking the callback
+            # We don't need to track this task since word boundaries arrive quickly
+            # and complete before synthesis finishes
+            asyncio.create_task(self._add_word_timestamp_async(word, timestamp_seconds))
 
     async def _add_word_timestamp_async(self, word: str, timestamp: float):
         """Asynchronously add word timestamp to the queue.
@@ -513,16 +512,13 @@ class AzureTTSService(AudioContextWordTTSService):
         self._audio_queue.put_nowait(None)  # Signal completion
         # Schedule finalization of word timestamps
         if self._context_id:
-            self._pending_word_task = asyncio.create_task(self._finalize_word_timestamps())
+            asyncio.create_task(self._finalize_word_timestamps())
 
     async def _finalize_word_timestamps(self):
         """Add completion markers to word timestamp queue."""
-        # Wait for any pending word timestamp tasks
-        if self._pending_word_task and not self._pending_word_task.done():
-            try:
-                await self._pending_word_task
-            except Exception as e:
-                logger.error(f"Error waiting for word timestamp task: {e}")
+        # Wait briefly for any in-flight word boundary events to be processed
+        # Word boundaries arrive very quickly, so a short wait should be sufficient
+        await asyncio.sleep(0.1)
         await self.add_word_timestamps([("TTSStoppedFrame", 0), ("Reset", 0)])
 
     def _handle_canceled(self, evt):
