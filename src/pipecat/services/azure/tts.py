@@ -44,6 +44,12 @@ except ModuleNotFoundError as e:
     raise Exception(f"Missing module: {e}")
 
 
+# Time to wait for word boundary events to complete after synthesis finishes
+# Word boundaries typically arrive very quickly during synthesis, so this
+# wait allows any in-flight events to be processed before finalizing
+WORD_BOUNDARY_FINALIZATION_DELAY = 0.1  # seconds
+
+
 def sample_rate_to_output_format(sample_rate: int) -> SpeechSynthesisOutputFormat:
     """Convert sample rate to Azure speech synthesis output format.
 
@@ -518,7 +524,7 @@ class AzureTTSService(AudioContextWordTTSService):
         """Add completion markers to word timestamp queue."""
         # Wait briefly for any in-flight word boundary events to be processed
         # Word boundaries arrive very quickly, so a short wait should be sufficient
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(WORD_BOUNDARY_FINALIZATION_DELAY)
         await self.add_word_timestamps([("TTSStoppedFrame", 0), ("Reset", 0)])
 
     def _handle_canceled(self, evt):
