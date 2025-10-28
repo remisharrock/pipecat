@@ -13,15 +13,19 @@ from loguru import logger
 from pydantic import BaseModel
 
 from pipecat.frames.frames import (
+    CancelFrame,
+    EndFrame,
     ErrorFrame,
     Frame,
+    InterruptionFrame,
     StartFrame,
     TTSAudioRawFrame,
     TTSStartedFrame,
     TTSStoppedFrame,
 )
+from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.azure.common import language_to_azure_language
-from pipecat.services.tts_service import TTSService
+from pipecat.services.tts_service import AudioContextWordTTSService, TTSService
 from pipecat.transcriptions.language import Language
 from pipecat.utils.tracing.service_decorators import traced_tts
 
@@ -233,24 +237,195 @@ class AzureBaseTTSService(TTSService):
         return escaped_text
 
 
-class AzureTTSService(AzureBaseTTSService):
-    """Azure Cognitive Services streaming TTS service.
+class AzureTTSService(AudioContextWordTTSService):
+    """Azure Cognitive Services streaming TTS service with word timestamps.
 
     Provides real-time text-to-speech synthesis using Azure's WebSocket-based
-    streaming API. Audio chunks are streamed as they become available for
-    lower latency playback.
+    streaming API. Audio chunks and word boundaries are streamed as they become
+    available for lower latency playback and accurate word-level synchronization.
     """
 
-    def __init__(self, **kwargs):
+    # Define SSML escape mappings based on SSML reserved characters
+    # See - https://learn.microsoft.com/en-us/azure/ai-services/speech-service/speech-synthesis-markup-structure
+    SSML_ESCAPE_CHARS = {
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&apos;",
+    }
+
+    class InputParams(BaseModel):
+        """Input parameters for Azure TTS voice configuration.
+
+        Parameters:
+            emphasis: Emphasis level for speech ("strong", "moderate", "reduced").
+            language: Language for synthesis. Defaults to English (US).
+            pitch: Voice pitch adjustment (e.g., "+10%", "-5Hz", "high").
+            rate: Speech rate multiplier. Defaults to "1.05".
+            role: Voice role for expression (e.g., "YoungAdultFemale").
+            style: Speaking style (e.g., "cheerful", "sad", "excited").
+            style_degree: Intensity of the speaking style (0.01 to 2.0).
+            volume: Volume level (e.g., "+20%", "loud", "x-soft").
+        """
+
+        emphasis: Optional[str] = None
+        language: Optional[Language] = Language.EN_US
+        pitch: Optional[str] = None
+        rate: Optional[str] = "1.05"
+        role: Optional[str] = None
+        style: Optional[str] = None
+        style_degree: Optional[str] = None
+        volume: Optional[str] = None
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        region: str,
+        voice="en-US-SaraNeural",
+        sample_rate: Optional[int] = None,
+        params: Optional[InputParams] = None,
+        **kwargs,
+    ):
         """Initialize the Azure streaming TTS service.
 
         Args:
-            **kwargs: All arguments passed to AzureBaseTTSService parent class.
+            api_key: Azure Cognitive Services subscription key.
+            region: Azure region identifier (e.g., "eastus", "westus2").
+            voice: Voice name to use for synthesis. Defaults to "en-US-SaraNeural".
+            sample_rate: Audio sample rate in Hz. If None, uses service default.
+            params: Voice and synthesis parameters configuration.
+            **kwargs: Additional arguments passed to parent AudioContextWordTTSService.
         """
-        super().__init__(**kwargs)
+        # We want to push text frames ourselves with word-level timing
+        super().__init__(
+            aggregate_sentences=True,
+            push_text_frames=False,
+            pause_frame_processing=True,
+            sample_rate=sample_rate,
+            **kwargs,
+        )
+
+        params = params or AzureTTSService.InputParams()
+
+        self._settings = {
+            "emphasis": params.emphasis,
+            "language": self.language_to_service_language(params.language)
+            if params.language
+            else "en-US",
+            "pitch": params.pitch,
+            "rate": params.rate,
+            "role": params.role,
+            "style": params.style,
+            "style_degree": params.style_degree,
+            "volume": params.volume,
+        }
+
+        self._api_key = api_key
+        self._region = region
+        self._voice_id = voice
         self._speech_config = None
         self._speech_synthesizer = None
         self._audio_queue = asyncio.Queue()
+        self._context_id = None
+
+    def can_generate_metrics(self) -> bool:
+        """Check if this service can generate processing metrics.
+
+        Returns:
+            True, as Azure TTS service supports metrics generation.
+        """
+        return True
+
+    def language_to_service_language(self, language: Language) -> Optional[str]:
+        """Convert a Language enum to Azure language format.
+
+        Args:
+            language: The language to convert.
+
+        Returns:
+            The Azure-specific language code, or None if not supported.
+        """
+        return language_to_azure_language(language)
+
+    def _construct_ssml(self, text: str) -> str:
+        """Construct SSML from text with current voice settings.
+
+        Args:
+            text: The text to convert to SSML.
+
+        Returns:
+            SSML string for Azure TTS synthesis.
+        """
+        language = self._settings["language"]
+
+        # Escape special characters
+        escaped_text = self._escape_text(text)
+
+        ssml = (
+            f"<speak version='1.0' xml:lang='{language}' "
+            "xmlns='http://www.w3.org/2001/10/synthesis' "
+            "xmlns:mstts='http://www.w3.org/2001/mstts'>"
+            f"<voice name='{self._voice_id}'>"
+            "<mstts:silence type='Sentenceboundary' value='20ms' />"
+        )
+
+        if self._settings["style"]:
+            ssml += f"<mstts:express-as style='{self._settings['style']}'"
+            if self._settings["style_degree"]:
+                ssml += f" styledegree='{self._settings['style_degree']}'"
+            if self._settings["role"]:
+                ssml += f" role='{self._settings['role']}'"
+            ssml += ">"
+
+        prosody_attrs = []
+        if self._settings["rate"]:
+            prosody_attrs.append(f"rate='{self._settings['rate']}'")
+        if self._settings["pitch"]:
+            prosody_attrs.append(f"pitch='{self._settings['pitch']}'")
+        if self._settings["volume"]:
+            prosody_attrs.append(f"volume='{self._settings['volume']}'")
+
+        ssml += f"<prosody {' '.join(prosody_attrs)}>"
+
+        if self._settings["emphasis"]:
+            ssml += f"<emphasis level='{self._settings['emphasis']}'>"
+
+        ssml += escaped_text
+
+        if self._settings["emphasis"]:
+            ssml += "</emphasis>"
+
+        ssml += "</prosody>"
+
+        if self._settings["style"]:
+            ssml += "</mstts:express-as>"
+
+        ssml += "</voice></speak>"
+
+        return ssml
+
+    def _escape_text(self, text: str) -> str:
+        """Escapes XML/SSML reserved characters according to Microsoft documentation.
+
+        This method escapes the following characters:
+        - & becomes &amp;
+        - < becomes &lt;
+        - > becomes &gt;
+        - " becomes &quot;
+        - ' becomes &apos;
+
+        Args:
+            text: The text to escape.
+
+        Returns:
+            The escaped text.
+        """
+        escaped_text = text
+        for char, escape_code in AzureTTSService.SSML_ESCAPE_CHARS.items():
+            escaped_text = escaped_text.replace(char, escape_code)
+        return escaped_text
 
     async def start(self, frame: StartFrame):
         """Start the Azure TTS service and initialize speech synthesizer.
@@ -286,24 +461,90 @@ class AzureTTSService(AzureBaseTTSService):
         self._speech_synthesizer.synthesizing.connect(self._handle_synthesizing)
         self._speech_synthesizer.synthesis_completed.connect(self._handle_completed)
         self._speech_synthesizer.synthesis_canceled.connect(self._handle_canceled)
+        # Add word boundary event handler for word-level timestamps
+        self._speech_synthesizer.synthesis_word_boundary.connect(self._handle_word_boundary)
+
+    def _handle_word_boundary(self, evt):
+        """Handle word boundary events from Azure SDK.
+        
+        Args:
+            evt: Word boundary event containing word text and audio offset.
+        """
+        # evt.text contains the word
+        # evt.audio_offset contains timing in ticks (100-nanosecond units)
+        # Convert ticks to seconds: divide by 10,000,000
+        word = evt.text
+        timestamp_seconds = evt.audio_offset / 10_000_000.0
+        
+        # Queue the word timestamp for processing
+        if self._context_id and word:
+            # Use asyncio to add the word timestamp asynchronously
+            asyncio.create_task(self._add_word_timestamp_async(word, timestamp_seconds))
+
+    async def _add_word_timestamp_async(self, word: str, timestamp: float):
+        """Asynchronously add word timestamp to the queue.
+        
+        Args:
+            word: The word text.
+            timestamp: The timestamp in seconds.
+        """
+        await self.add_word_timestamps([(word, timestamp)])
 
     def _handle_synthesizing(self, evt):
-        """Handle audio chunks as they arriv."""
+        """Handle audio chunks as they arrive.
+        
+        Args:
+            evt: Synthesis event containing audio data.
+        """
         if evt.result and evt.result.audio_data:
             self._audio_queue.put_nowait(evt.result.audio_data)
 
     def _handle_completed(self, evt):
-        """Handle synthesis completion."""
+        """Handle synthesis completion.
+        
+        Args:
+            evt: Completion event.
+        """
         self._audio_queue.put_nowait(None)  # Signal completion
+        # Add end markers for word timestamps
+        if self._context_id:
+            asyncio.create_task(self._finalize_word_timestamps())
+
+    async def _finalize_word_timestamps(self):
+        """Add completion markers to word timestamp queue."""
+        await self.add_word_timestamps([("TTSStoppedFrame", 0), ("Reset", 0)])
 
     def _handle_canceled(self, evt):
-        """Handle synthesis cancellation."""
+        """Handle synthesis cancellation.
+        
+        Args:
+            evt: Cancellation event.
+        """
         logger.error(f"Speech synthesis canceled: {evt.result.cancellation_details.reason}")
         self._audio_queue.put_nowait(None)
 
     async def flush_audio(self):
         """Flush any pending audio data."""
         logger.trace(f"{self}: flushing audio")
+        # Audio context will handle flushing
+
+    async def _handle_interruption(self, frame: InterruptionFrame, direction: FrameDirection):
+        """Handle interruption by stopping current synthesis.
+        
+        Args:
+            frame: The interruption frame.
+            direction: Frame processing direction.
+        """
+        await super()._handle_interruption(frame, direction)
+        await self.stop_all_metrics()
+        # Clear the audio queue
+        while not self._audio_queue.empty():
+            try:
+                self._audio_queue.get_nowait()
+                self._audio_queue.task_done()
+            except asyncio.QueueEmpty:
+                break
+        self._context_id = None
 
     @traced_tts
     async def run_tts(self, text: str) -> AsyncGenerator[Frame, None]:
@@ -332,8 +573,12 @@ class AzureTTSService(AzureBaseTTSService):
                 return
 
             try:
-                await self.start_ttfb_metrics()
-                yield TTSStartedFrame()
+                # Create a context for this synthesis request
+                if not self._context_id:
+                    await self.start_ttfb_metrics()
+                    yield TTSStartedFrame()
+                    self._context_id = str(id(text))  # Use text id as context
+                    await self.create_audio_context(self._context_id)
 
                 ssml = self._construct_ssml(text)
                 self._speech_synthesizer.speak_ssml_async(ssml)
@@ -346,11 +591,18 @@ class AzureTTSService(AzureBaseTTSService):
                         break
 
                     await self.stop_ttfb_metrics()
-                    yield TTSAudioRawFrame(
+                    self.start_word_timestamps()
+                    frame = TTSAudioRawFrame(
                         audio=chunk,
                         sample_rate=self.sample_rate,
                         num_channels=1,
                     )
+                    await self.append_to_audio_context(self._context_id, frame)
+
+                # Remove context when done
+                if self._context_id:
+                    await self.remove_audio_context(self._context_id)
+                    self._context_id = None
 
                 yield TTSStoppedFrame()
 
