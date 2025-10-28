@@ -27,6 +27,7 @@ from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.azure.common import language_to_azure_language
 from pipecat.services.tts_service import TTSService, WordTTSService
 from pipecat.transcriptions.language import Language
+from pipecat.utils.time import seconds_to_nanoseconds
 from pipecat.utils.tracing.service_decorators import traced_tts
 
 try:
@@ -42,12 +43,6 @@ except ModuleNotFoundError as e:
     logger.error(f"Exception: {e}")
     logger.error("In order to use Azure, you need to `pip install pipecat-ai[azure]`.")
     raise Exception(f"Missing module: {e}")
-
-
-# Time to wait for word boundary events to complete after synthesis finishes
-# Word boundaries typically arrive very quickly during synthesis, so this
-# wait allows any in-flight events to be processed before finalizing
-WORD_BOUNDARY_FINALIZATION_DELAY = 0.1  # seconds
 
 
 def sample_rate_to_output_format(sample_rate: int) -> SpeechSynthesisOutputFormat:
@@ -485,20 +480,15 @@ class AzureTTSService(WordTTSService):
         timestamp_seconds = evt.audio_offset / 10_000_000.0
 
         # Queue the word timestamp for processing
+        # Use put_nowait since this is a synchronous callback
         if self._context_id and word:
-            # Create task to add word timestamp without blocking the callback
-            # We don't need to track this task since word boundaries arrive quickly
-            # and complete before synthesis finishes
-            asyncio.create_task(self._add_word_timestamp_async(word, timestamp_seconds))
-
-    async def _add_word_timestamp_async(self, word: str, timestamp: float):
-        """Asynchronously add word timestamp to the queue.
-
-        Args:
-            word: The word text.
-            timestamp: The timestamp in seconds.
-        """
-        await self.add_word_timestamps([(word, timestamp)])
+            logger.debug(f"{self}: Word boundary - '{word}' at {timestamp_seconds:.2f}s")
+            try:
+                # Convert to nanoseconds and put directly in queue (sync operation)
+                timestamp_ns = seconds_to_nanoseconds(timestamp_seconds)
+                self._words_queue.put_nowait((word, timestamp_ns))
+            except Exception as e:
+                logger.error(f"{self} error adding word timestamp: {e}")
 
     def _handle_synthesizing(self, evt):
         """Handle audio chunks as they arrive.
@@ -516,16 +506,15 @@ class AzureTTSService(WordTTSService):
             evt: Completion event from Azure Speech SDK.
         """
         self._audio_queue.put_nowait(None)  # Signal completion
-        # Schedule finalization of word timestamps
+        # Add completion markers to word timestamp queue
+        # Use put_nowait since this is a synchronous callback
         if self._context_id:
-            asyncio.create_task(self._finalize_word_timestamps())
-
-    async def _finalize_word_timestamps(self):
-        """Add completion markers to word timestamp queue."""
-        # Wait briefly for any in-flight word boundary events to be processed
-        # Word boundaries arrive very quickly, so a short wait should be sufficient
-        await asyncio.sleep(WORD_BOUNDARY_FINALIZATION_DELAY)
-        await self.add_word_timestamps([("TTSStoppedFrame", 0), ("Reset", 0)])
+            try:
+                # Add markers synchronously - TTSStoppedFrame and Reset
+                self._words_queue.put_nowait(("TTSStoppedFrame", 0))
+                self._words_queue.put_nowait(("Reset", 0))
+            except Exception as e:
+                logger.error(f"{self} error finalizing word timestamps: {e}")
 
     def _handle_canceled(self, evt):
         """Handle synthesis cancellation.
