@@ -473,7 +473,7 @@ class AzureTTSService(WordTTSService):
 
     def _handle_word_boundary(self, evt):
         """Handle word boundary events from Azure SDK.
-        
+
         Args:
             evt: SpeechSynthesisWordBoundaryEventArgs from Azure Speech SDK
                 containing word text and audio offset timing.
@@ -483,7 +483,7 @@ class AzureTTSService(WordTTSService):
         # Convert ticks to seconds: divide by 10,000,000
         word = evt.text
         timestamp_seconds = evt.audio_offset / 10_000_000.0
-        
+
         # Queue the word timestamp for processing
         if self._context_id and word:
             # Create task to add word timestamp without blocking the callback
@@ -493,7 +493,7 @@ class AzureTTSService(WordTTSService):
 
     async def _add_word_timestamp_async(self, word: str, timestamp: float):
         """Asynchronously add word timestamp to the queue.
-        
+
         Args:
             word: The word text.
             timestamp: The timestamp in seconds.
@@ -502,7 +502,7 @@ class AzureTTSService(WordTTSService):
 
     def _handle_synthesizing(self, evt):
         """Handle audio chunks as they arrive.
-        
+
         Args:
             evt: Synthesis event containing audio data.
         """
@@ -511,7 +511,7 @@ class AzureTTSService(WordTTSService):
 
     def _handle_completed(self, evt):
         """Handle synthesis completion.
-        
+
         Args:
             evt: Completion event from Azure Speech SDK.
         """
@@ -529,7 +529,7 @@ class AzureTTSService(WordTTSService):
 
     def _handle_canceled(self, evt):
         """Handle synthesis cancellation.
-        
+
         Args:
             evt: Cancellation event.
         """
@@ -542,7 +542,7 @@ class AzureTTSService(WordTTSService):
 
     async def _handle_interruption(self, frame: InterruptionFrame, direction: FrameDirection):
         """Handle interruption by stopping current synthesis.
-        
+
         Args:
             frame: The interruption frame.
             direction: Frame processing direction.
@@ -587,7 +587,7 @@ class AzureTTSService(WordTTSService):
             try:
                 await self.start_ttfb_metrics()
                 yield TTSStartedFrame()
-                
+
                 # Mark that we're starting a new synthesis
                 self._context_id = str(id(text))
                 self._word_timestamps_started = False
@@ -607,7 +607,7 @@ class AzureTTSService(WordTTSService):
                     if not self._word_timestamps_started:
                         self.start_word_timestamps()
                         self._word_timestamps_started = True
-                    
+
                     frame = TTSAudioRawFrame(
                         audio=chunk,
                         sample_rate=self.sample_rate,
