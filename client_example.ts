@@ -5,6 +5,10 @@
  * in a JavaScript/TypeScript client.
  */
 
+// Constants for timestamp conversions
+const NANOSECONDS_TO_MILLISECONDS = 1_000_000;
+const NANOSECONDS_TO_SECONDS = 1_000_000_000;
+
 interface BotTtsTextData {
   text: string;
   timestamp?: number; // Optional: nanoseconds since TTS started
@@ -35,7 +39,7 @@ class TimedSubtitleDisplay {
   onBotTtsText(data: BotTtsTextData) {
     console.log('[TTS Text]', {
       text: data.text,
-      timestamp: data.timestamp ? `${(data.timestamp / 1_000_000_000).toFixed(2)}s` : 'none'
+      timestamp: data.timestamp ? `${(data.timestamp / NANOSECONDS_TO_SECONDS).toFixed(2)}s` : 'none'
     });
 
     if (data.timestamp !== undefined) {
@@ -68,7 +72,7 @@ class TimedSubtitleDisplay {
     }
 
     // Convert nanoseconds to milliseconds
-    const timestampMs = timestampNs / 1_000_000;
+    const timestampMs = timestampNs / NANOSECONDS_TO_MILLISECONDS;
     const elapsed = Date.now() - this.startTime;
     const delay = Math.max(0, timestampMs - elapsed);
 
@@ -118,7 +122,7 @@ class KaraokeSubtitleDisplay {
     }
 
     const word = this.words[this.currentIndex];
-    const timestampMs = word.timestamp / 1_000_000;
+    const timestampMs = word.timestamp / NANOSECONDS_TO_MILLISECONDS;
     const elapsed = Date.now() - this.startTime;
     const delay = Math.max(0, timestampMs - elapsed);
 
@@ -150,7 +154,7 @@ const rtviClient = {
       // Check if timestamp is available
       if (data.timestamp) {
         // New behavior: use timestamp for synchronization
-        const timeSeconds = data.timestamp / 1_000_000_000;
+        const timeSeconds = data.timestamp / NANOSECONDS_TO_SECONDS;
         console.log(`  Word: "${data.text}" at ${timeSeconds.toFixed(2)}s`);
         scheduleWordDisplay(data.text, data.timestamp);
       } else {
