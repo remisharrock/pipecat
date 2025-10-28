@@ -329,6 +329,8 @@ class AzureTTSService(AudioContextWordTTSService):
         self._speech_synthesizer = None
         self._audio_queue = asyncio.Queue()
         self._context_id = None
+        self._pending_word_task = None
+        self._word_timestamps_started = False
 
     def can_generate_metrics(self) -> bool:
         """Check if this service can generate processing metrics.
@@ -468,7 +470,8 @@ class AzureTTSService(AudioContextWordTTSService):
         """Handle word boundary events from Azure SDK.
         
         Args:
-            evt: Word boundary event containing word text and audio offset.
+            evt: SpeechSynthesisWordBoundaryEventArgs from Azure Speech SDK
+                containing word text and audio offset timing.
         """
         # evt.text contains the word
         # evt.audio_offset contains timing in ticks (100-nanosecond units)
@@ -478,8 +481,10 @@ class AzureTTSService(AudioContextWordTTSService):
         
         # Queue the word timestamp for processing
         if self._context_id and word:
-            # Use asyncio to add the word timestamp asynchronously
-            asyncio.create_task(self._add_word_timestamp_async(word, timestamp_seconds))
+            # Schedule word timestamp addition without blocking
+            self._pending_word_task = asyncio.create_task(
+                self._add_word_timestamp_async(word, timestamp_seconds)
+            )
 
     async def _add_word_timestamp_async(self, word: str, timestamp: float):
         """Asynchronously add word timestamp to the queue.
@@ -503,15 +508,21 @@ class AzureTTSService(AudioContextWordTTSService):
         """Handle synthesis completion.
         
         Args:
-            evt: Completion event.
+            evt: Completion event from Azure Speech SDK.
         """
         self._audio_queue.put_nowait(None)  # Signal completion
-        # Add end markers for word timestamps
+        # Schedule finalization of word timestamps
         if self._context_id:
-            asyncio.create_task(self._finalize_word_timestamps())
+            self._pending_word_task = asyncio.create_task(self._finalize_word_timestamps())
 
     async def _finalize_word_timestamps(self):
         """Add completion markers to word timestamp queue."""
+        # Wait for any pending word timestamp tasks
+        if self._pending_word_task and not self._pending_word_task.done():
+            try:
+                await self._pending_word_task
+            except Exception as e:
+                logger.error(f"Error waiting for word timestamp task: {e}")
         await self.add_word_timestamps([("TTSStoppedFrame", 0), ("Reset", 0)])
 
     def _handle_canceled(self, evt):
@@ -579,6 +590,7 @@ class AzureTTSService(AudioContextWordTTSService):
                     yield TTSStartedFrame()
                     self._context_id = str(id(text))  # Use text id as context
                     await self.create_audio_context(self._context_id)
+                    self._word_timestamps_started = False
 
                 ssml = self._construct_ssml(text)
                 self._speech_synthesizer.speak_ssml_async(ssml)
@@ -591,20 +603,27 @@ class AzureTTSService(AudioContextWordTTSService):
                         break
 
                     await self.stop_ttfb_metrics()
-                    self.start_word_timestamps()
+                    # Start word timestamps only once when we receive first audio
+                    if not self._word_timestamps_started:
+                        self.start_word_timestamps()
+                        self._word_timestamps_started = True
+                    
                     frame = TTSAudioRawFrame(
                         audio=chunk,
                         sample_rate=self.sample_rate,
                         num_channels=1,
                     )
+                    # Add to audio context - it will be pushed automatically by the context handler
                     await self.append_to_audio_context(self._context_id, frame)
 
-                # Remove context when done
+                # Remove context when done - this signals completion to the context handler
                 if self._context_id:
                     await self.remove_audio_context(self._context_id)
                     self._context_id = None
 
-                yield TTSStoppedFrame()
+                # Yield None to signal we're done generating frames
+                # The audio context handler will push frames downstream
+                yield None
 
             except Exception as e:
                 logger.error(f"{self} error during synthesis: {e}")
